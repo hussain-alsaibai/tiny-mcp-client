@@ -1,143 +1,152 @@
 # tiny-mcp-client
 
-> Zero-dependency Model Context Protocol client. Stdlib only · MIT · One file.
+**Zero-dependency Model Context Protocol client for Python.** Connects to any MCP server — including [tiny-mcp-server](https://github.com/hussain-alsaibai/tiny-mcp-server) — via stdlib `http.client` + `json`. No external dependencies.
 
-Connect to **any MCP server** — Claude Desktop, Cursor, Cline, custom servers — over stdio (local subprocess) or SSE/HTTP.
+> **Part of the [tiny-\* ecosystem](https://github.com/hussain-alsaibai/tiny-mcp-server)** — tiny-mcp-server, tiny-mcp-registry, tiny-mcp-observability, and now tiny-mcp-client.
+
+## Install
 
 ```bash
 pip install tiny-mcp-client
-# or: copy tiny_mcp_client.py into your project
 ```
+
+Or copy `tiny_mcp_client.py` — it's one file, no dependencies.
 
 ## Features
 
-- **Stdio transport** — Run MCP servers as subprocesses, communicate over stdin/stdout
-- **SSE/HTTP transport** — Connect to remote MCP servers over HTTP with Server-Sent Events
-- **Tool calls** — Call any MCP tool with typed arguments
-- **Resource reading** — Read MCP resources by URI
-- **Prompt rendering** — Get rendered prompts from MCP servers
-- **Server introspection** — List tools, resources, and prompts automatically on connect
-- **CLI included** — Inspect any MCP server from the command line
+| Feature | Description |
+|---------|-------------|
+| **Zero deps** | Stdlib only (`http.client`, `json`, `uuid`) — Python 3.8+ |
+| **Async + Sync** | `MCPClient` (async) and `MCPSyncClient` (sync wrapper) |
+| **Full MCP API** | Tools, resources, prompts, sampling |
+| **Auth ready** | Bearer token via `api_key` parameter |
+| **Timeout control** | Per-request timeout, `MCPTimeoutError` on breach |
+| **Context manager** | `async with` lifecycle management |
 
 ## Quick Start
 
-### Python API
+### Async
 
 ```python
+import asyncio
 from tiny_mcp_client import MCPClient
 
-# Connect to a local MCP server (stdio)
-with MCPClient(["npx", "@modelcontextprotocol/server-filesystem", "./data"]) as client:
-    print(f"Tools: {client.tool_names()}")
-    
-    # Call a tool
-    result = client.call_tool("read_file", {"path": "/tmp/test.txt"})
-    print(result.content[0]["text"])
-    
-    # Read a resource
-    resource = client.read_resource("file:///tmp/test.txt")
-    print(resource.contents[0]["text"])
+async def main():
+    async with MCPClient("http://localhost:8765") as client:
+        print(f"Server: {client.server_info.name} v{client.server_info.version}")
 
-# Connect to a remote MCP server (SSE)
-client = MCPClient("http://localhost:3000", transport="sse")
-client.start()
-tools = client.list_tools()
-print(f"Available tools: {[t.name for t in tools]}")
-client.stop()
+        # List available tools
+        tools = await client.list_tools()
+        for tool in tools:
+            print(f"  {tool.name}: {tool.description}")
+
+        # Call a tool
+        result = await client.call_tool("fetch_url", {"url": "https://example.com"})
+        print(result)
+
+asyncio.run(main())
 ```
 
-### CLI
+### Sync
 
-```bash
-# List tools from a filesystem MCP server
-python tiny_mcp_client.py npx @modelcontextprotocol/server-filesystem ./data --tools
+```python
+from tiny_mcp_client import MCPSyncClient
 
-# Call a specific tool
-python tiny_mcp_client.py npx @modelcontextprotocol/server-filesystem ./data \
-  --call read_file --args '{"path": "/tmp/foo"}'
-
-# List resources
-python tiny_mcp_client.py npx @modelcontextprotocol/server-filesystem ./data --resources --json
+with MCPSyncClient("http://localhost:8765") as client:
+    tools = client.list_tools()
+    result = client.call_tool("search", {"query": "LLM trends"})
+    print(result)
 ```
 
-## Supported Providers
-
-| Provider | Transport | Auth | Notes |
-|----------|-----------|------|-------|
-| Claude Desktop | Stdio | — | Use `claude_desktop_sse.py` path from config |
-| Cursor | Stdio | — | MCP server command from settings |
-| Cline | Stdio | — | `npx @modelcontextprotocol/server-filesystem` |
-| Custom servers | Stdio or SSE | Any | Pass any command or URL |
-
-## API Reference
-
-### `MCPClient`
+### With Auth
 
 ```python
 client = MCPClient(
-    server=["npx", "@mcp/server", "./data"],  # command list (stdio) or URL (SSE)
-    transport="stdio",  # or "sse"
-    cwd=None,           # working dir for subprocess
-    env=None,           # extra env vars
-    headers=None,       # HTTP headers for SSE
-    timeout=30,         # seconds per call
+    "https://api.example.com/mcp",
+    api_key="your-token-here",
+    timeout=120.0,
 )
-client.start()          # Initialize + discover tools/resources/prompts
-client.stop()           # Stop transport
+```
 
-# Tools
-client.list_tools()     # → list[Tool]
-client.call_tool(name, args)  # → ToolResult
-client.find_tool(name)  # → Tool | None
+### Connect to tiny-mcp-server
 
-# Resources
-client.list_resources()  # → list[Resource]
-client.read_resource(uri)   # → ResourceResult
+```python
+# Start a tiny-mcp-server first:
+#   python -m tiny_mcp_server --port 8765
 
-# Prompts
-client.list_prompts()    # → list[Prompt]
-client.get_prompt(name, args)  # → dict
+from tiny_mcp_client import MCPClient
+import asyncio
 
-# Properties
-client.tools            # List[Tool]
-client.resources        # List[Resource]
-client.prompts          # List[Prompt]
+async def main():
+    async with MCPClient("http://localhost:8765") as client:
+        tools = await client.list_tools()
+        print(f"Connected to {client.server_info.name}")
+        print(f"Available tools: {[t.name for t in tools]}")
+
+asyncio.run(main())
+```
+
+## API Reference
+
+### `MCPClient` (async)
+
+```python
+client = MCPClient(
+    url="http://localhost:8765",    # MCP server URL
+    headers={"X-Custom": "value"},  # Extra HTTP headers
+    timeout=60.0,                    # Request timeout (seconds)
+    api_key="token",                 # Bearer auth
+    auto_initialize=True,            # Call initialize() on __aenter__
+    client_info={"name": "my-app", "version": "1.0"},
+)
+```
+
+**Methods:**
+- `await client.initialize()` → `ServerInfo` — Send handshake
+- `await client.close()` — End session
+- `await client.list_tools()` → `List[ToolDefinition]`
+- `await client.call_tool(name, arguments)` → `Any`
+- `await client.list_resources()` → `List[ResourceDefinition]`
+- `await client.read_resource(uri)` → `Any`
+- `await client.list_prompts()` → `List[PromptDefinition]`
+- `await client.get_prompt(name, arguments)` → `Any`
+- `await client.create_sampling_message(...)` → `Any`
+
+### `MCPSyncClient`
+
+Same interface, synchronous. Uses a thread pool under the hood.
+
+### `JSONRPCTransport`
+
+Low-level transport if you need it:
+
+```python
+transport = JSONRPCTransport("http://localhost:8765", api_key="...")
+result, error = transport.request("tools/list")
+transport.notify("resources/subscribe", {"uri": "file:///data.json"})
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Your Python Code / CLI                          │
-│  MCPClient                                       │
-│  ├─ stdio → StdioTransport → subprocess          │
-│  └─ http → SSETransport → HTTP/SSE server        │
-│                                                 │
-│  JSON-RPC 2.0 over stdin/stdout or HTTP/SSE    │
-│                                                 │
-│  MCP Protocol: initialize, tools/list,           │
-│  tools/call, resources/read, prompts/get        │
-└─────────────────────────────────────────────────┘
+your code          tiny-mcp-client          MCP server
+   │                      │                      │
+   │─── MCPClient ────────►│                      │
+   │                       │─── HTTP POST ────────►│
+   │                       │◄── JSON-RPC response ──│
+   │◄── Python result ──────│                      │
+   │                       │                      │
 ```
 
-## Why?
+## tiny-\* Ecosystem
 
-Most MCP client libraries are framework-shaped (LangChain MCP, modelcontextprotocol SDK). `tiny-mcp-client` is **one file, zero dependencies**, and works anywhere Python runs. No Node.js, no npm, no framework.
-
-## Part of the tiny-* Ecosystem
-
-```
-tiny-mcp         — MCP server  (this repo)
-tiny-mcp-client  — MCP client  (you are here)
-tiny-agent       — Minimal agent framework
-tiny-router      — HTTP routing
-tiny-log         — Structured logging
-tiny-validator   — Input validation
-fast-cache       — LRU+TTL cache
-```
-
-See all 35+ repos at: [github.com/hussain-alsaibai](https://github.com/hussain-alsaibai)
+| Package | Description |
+|---------|-------------|
+| [tiny-mcp-server](https://github.com/hussain-alsaibai/tiny-mcp-server) | Build MCP servers in one file |
+| [tiny-mcp-registry](https://github.com/hussain-alsaibai/tiny-mcp-registry) | Discover and manage MCP servers |
+| [tiny-mcp-observability](https://github.com/hussain-alsaibai/tiny-mcp-observability) | Tracing and metrics for MCP pipelines |
+| **tiny-mcp-client** | Connect to any MCP server |
 
 ## License
 
-MIT — do anything with it. Built by [OpenClaw 🦞](https://github.com/hussain-alsaibai)
+MIT — see [LICENSE](LICENSE)
