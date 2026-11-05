@@ -150,3 +150,42 @@ your code          tiny-mcp-client          MCP server
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+## Pin and diff tool contracts
+
+Reference MCP servers change tool contracts silently — a description is
+reworded, an input property becomes required, a tool disappears. A consumer
+that installed a published package cannot run the server repo's CI to notice.
+
+`tiny_mcp_contract` pins what a server exposed and diffs two versions:
+
+```python
+import asyncio
+from tiny_mcp_client import MCPClient
+from tiny_mcp_contract import Snapshot, diff, has_breaking
+
+async def pin(url, path, server, version):
+    async with MCPClient(url) as client:
+        snap = Snapshot.build(await client.list_tools(), server=server, version=version)
+    with open(path, "w") as f:
+        f.write(snap.dumps())
+
+asyncio.run(pin("https://example.com/mcp", "filesystem-2.2.0.json", "filesystem", "2.2.0"))
+
+# later, against a new release: check the old snapshot against the live server
+async def check(url, path):
+    old = Snapshot.loads(open(path).read())
+    async with MCPClient(url) as client:
+        new = Snapshot.build(await client.list_tools(), server=old.server, version="latest")
+    changes = diff(old, new)
+    for c in changes:
+        print(c)
+    return not has_breaking(changes)
+
+raise SystemExit(0 if asyncio.run(check("https://example.com/mcp", "filesystem-2.2.0.json")) else 1)
+```
+
+Detected classes: `ADDED`, `GONE`, `CHANGED` (description or outputSchema),
+and `BREAKING` — a new required input property, a removed property, a changed
+property shape, or a narrowed `enum`. Digests are sha-256 over a canonical
+(key-sorted) JSON form, so formatting changes do not register as drift.
