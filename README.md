@@ -224,3 +224,12 @@ Detected classes: `ADDED`, `GONE`, `CHANGED` (description or outputSchema),
 and `BREAKING` — a new required input property, a removed property, a changed
 property shape, or a narrowed `enum`. Digests are sha-256 over a canonical
 (key-sorted) JSON form, so formatting changes do not register as drift.
+
+This is the check to run **before** a server upgrade, not after: the failure it
+prevents is a tool contract that changed under an agent that cached the old
+schema. Pair it with `capabilities` — if `supports("tools")` is false there is
+nothing to diff, and the tool says so instead of emitting an empty snapshot.
+
+Test counts are derived, not transcribed: `python -m pytest -q` →
+`27 passed` for `tests/test_tiny_mcp_client.py`, `13 passed` for
+`tests/test_tiny_mcp_contract.py`, `40 passed` for the package as a whole.
