@@ -7,9 +7,23 @@ import pytest
 from unittest.mock import patch, MagicMock
 from tiny_mcp_client import (
     MCPClient, MCPSyncClient, MCPError, MCPAuthError, MCPTimeoutError,
+    MCPCapabilityError,
     ToolDefinition, ResourceDefinition, PromptDefinition, ServerInfo,
     JSONRPCTransport,
 )
+
+
+def _init_result(capabilities=None, **extra):
+    """Build an initialize result. Tests that exercise a capability must
+    advertise it -- the client now rejects calls the server never offered."""
+    result = {
+        "serverInfo": {"name": "test", "version": "1.0"},
+        "protocolVersion": "2024-11-05",
+    }
+    if capabilities is not None:
+        result["capabilities"] = capabilities
+    result.update(extra)
+    return result
 
 
 # ─── JSONRPCTransport ─────────────────────────────────────────────────────────
@@ -157,8 +171,12 @@ class TestMCPClient:
                 None,
             )
             client = MCPClient("http://localhost:8765", auto_initialize=False)
-            await client.initialize()
-            tools = await client.list_tools()
+            with patch.object(
+                JSONRPCTransport, "request",
+                side_effect=[(_init_result({"tools": {}}), None), mock_req.return_value],
+            ):
+                await client.initialize()
+                tools = await client.list_tools()
             assert len(tools) == 2
             assert tools[0].name == "web_search"
             assert tools[1].name == "fetch"
@@ -169,8 +187,12 @@ class TestMCPClient:
              patch.object(JSONRPCTransport, "notify"):
             mock_req.return_value = ({"content": [{"type": "text", "text": "result"}]}, None)
             client = MCPClient("http://localhost:8765", auto_initialize=False)
-            await client.initialize()
-            result = await client.call_tool("fetch", {"url": "https://example.com"})
+            with patch.object(
+                JSONRPCTransport, "request",
+                side_effect=[(_init_result({"tools": {}}), None), mock_req.return_value],
+            ):
+                await client.initialize()
+                result = await client.call_tool("fetch", {"url": "https://example.com"})
             assert result["content"][0]["text"] == "result"
 
     @pytest.mark.asyncio
@@ -221,7 +243,112 @@ class TestMCPSyncClient:
              patch.object(JSONRPCTransport, "notify"):
             mock_req.return_value = ({"tools": [{"name": "test_tool"}]}, None)
             client = MCPSyncClient("http://localhost:8765")
-            client.initialize()
-            tools = client.list_tools()
+            with patch.object(
+                JSONRPCTransport, "request",
+                side_effect=[(_init_result({"tools": {}}), None), mock_req.return_value],
+            ):
+                client.initialize()
+                tools = client.list_tools()
             assert len(tools) == 1
             assert tools[0].name == "test_tool"
+
+
+# ─── Capability negotiation ───────────────────────────────────────────────────
+class TestCapabilityNegotiation:
+    """A server that omits a capability is saying it does not implement it.
+
+    Before this guard, `list_tools()` against a server with no tools
+    capability sent `tools/list` anyway and surfaced whatever came back --
+    usually an opaque JSON-RPC "Method not found" that callers logged and
+    ignored. The guard turns that into a named, catchable error.
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_tools_capability_is_a_named_error(self):
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.return_value = (_init_result({"resources": {}}), None)
+            client = MCPClient("http://localhost:8765", auto_initialize=False)
+            await client.initialize()
+
+            assert client.is_initialized          # the handshake itself succeeded
+            assert client.supports("tools") is False
+            assert client.supports("resources") is True
+
+            with pytest.raises(MCPCapabilityError) as exc:
+                await client.list_tools()
+
+            err = exc.value
+            assert err.capability == "tools"
+            assert err.method == "tools/list"
+            assert err.code == -32601
+            assert "tools" in str(err)
+            # Nothing was ever sent: the transport saw exactly one call, the handshake.
+            assert mock_req.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_tools_capability_blocks_call_tool_too(self):
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.return_value = (_init_result({"prompts": {}}), None)
+            client = MCPClient("http://localhost:8765", auto_initialize=False)
+            await client.initialize()
+
+            with pytest.raises(MCPCapabilityError) as exc:
+                await client.call_tool("fetch", {"url": "https://example.com"})
+            assert exc.value.method == "tools/call"
+            assert mock_req.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_absent_capabilities_object_is_all_missing(self):
+        """No `capabilities` key at all == advertised none, not 'unknown'."""
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.return_value = (_init_result(), None)  # no capabilities key
+            client = MCPClient("http://localhost:8765", auto_initialize=False)
+            await client.initialize()
+
+            assert client.capabilities == {}
+            with pytest.raises(MCPCapabilityError):
+                await client.list_tools()
+            assert mock_req.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_dict_capabilities_does_not_crash(self):
+        """A malformed `capabilities: "tools"` must not become a TypeError."""
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.return_value = (_init_result("tools"), None)
+            client = MCPClient("http://localhost:8765", auto_initialize=False)
+            await client.initialize()
+            assert client.capabilities == {}
+            with pytest.raises(MCPCapabilityError):
+                await client.list_tools()
+
+    @pytest.mark.asyncio
+    async def test_advertised_capability_still_calls_through(self):
+        """Positive control: the guard must not block the advertised path."""
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.side_effect = [
+                (_init_result({"tools": {"listChanged": True}}), None),
+                ({"tools": [{"name": "ping"}]}, None),
+            ]
+            client = MCPClient("http://localhost:8765", auto_initialize=False)
+            await client.initialize()
+            tools = await client.list_tools()
+            assert [t.name for t in tools] == ["ping"]
+            assert mock_req.call_count == 2
+
+    def test_sync_client_raises_the_same_error(self):
+        with patch.object(JSONRPCTransport, "request") as mock_req, \
+             patch.object(JSONRPCTransport, "notify"):
+            mock_req.return_value = (_init_result({"resources": {}}), None)
+            client = MCPSyncClient("http://localhost:8765")
+            client.initialize()
+            with pytest.raises(MCPCapabilityError):
+                client.list_tools()
+
+    def test_capability_error_is_an_mcp_error(self):
+        """Catchable as MCPError, so existing handlers keep working."""
+        assert issubclass(MCPCapabilityError, MCPError)

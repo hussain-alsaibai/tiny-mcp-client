@@ -24,7 +24,13 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 __version__ = "0.1.0"
-__all__ = ["MCPClient", "MCPError", "MCPAuthError", "MCPTimeoutError"]
+__all__ = [
+    "MCPClient",
+    "MCPError",
+    "MCPAuthError",
+    "MCPTimeoutError",
+    "MCPCapabilityError",
+]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -51,6 +57,27 @@ class MCPTimeoutError(MCPError):
 
     def __init__(self, message: str = "Request timed out", data: Any = None):
         super().__init__(message, code=-32603, data=data)
+
+
+class MCPCapabilityError(MCPError):
+    """Raised when the server did not advertise a capability the call needs.
+
+    Per the MCP spec the ``initialize`` result carries a ``capabilities``
+    object, and a server that omits a capability is stating that it does not
+    implement it. Calling such a method anyway is a contract violation, so
+    the client fails here with a named error instead of sending a request
+    that can only come back as an opaque JSON-RPC "method not found".
+    """
+
+    def __init__(self, capability: str, method: str, data: Any = None):
+        super().__init__(
+            f"Server does not advertise the {capability!r} capability "
+            f"required by {method!r}",
+            code=-32601,
+            data=data,
+        )
+        self.capability = capability
+        self.method = method
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,6 +273,7 @@ class MCPClient:
         }
         self._server_info: Optional[ServerInfo] = None
         self._protocol_version: Optional[str] = None
+        self._capabilities: Dict[str, Any] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     async def __aenter__(self) -> "MCPClient":
@@ -279,6 +307,8 @@ class MCPClient:
 
         self._protocol_version = result.get("protocolVersion", "2024-11-05")
         self._server_info = ServerInfo.from_dict(result.get("serverInfo", {}))
+        raw_caps = result.get("capabilities")
+        self._capabilities = raw_caps if isinstance(raw_caps, dict) else {}
         self._initialized = True
 
         # Announce that the client is ready
@@ -298,11 +328,32 @@ class MCPClient:
     def server_info(self) -> Optional[ServerInfo]:
         return self._server_info
 
+    @property
+    def capabilities(self) -> Dict[str, Any]:
+        """Capabilities advertised in the server's ``initialize`` result.
+
+        Empty until ``initialize()`` succeeds. An empty dict after initialize
+        means the server advertised none.
+        """
+        return self._capabilities
+
+    def supports(self, capability: str) -> bool:
+        """True when the server advertised ``capability``."""
+        return capability in self._capabilities
+
+    def _require(self, capability: str, method: str) -> None:
+        """Raise MCPCapabilityError unless ``capability`` was advertised."""
+        if not self._initialized:
+            raise MCPError("Client not initialized. Call initialize() first.")
+        if capability not in self._capabilities:
+            raise MCPCapabilityError(
+                capability, method, data={"capabilities": dict(self._capabilities)}
+            )
+
     # ── Tools ─────────────────────────────────────────────────────────────────
     async def list_tools(self) -> List[ToolDefinition]:
         """List all available tools from the server."""
-        if not self._initialized:
-            raise MCPError("Client not initialized. Call initialize() first.")
+        self._require("tools", "tools/list")
         result, err = self._transport.request("tools/list")
         if err:
             raise MCPError(f"list_tools failed: {err}", code=getattr(err, "code", -32603))
@@ -323,8 +374,7 @@ class MCPClient:
         Returns:
             Tool result (structure varies by tool).
         """
-        if not self._initialized:
-            raise MCPError("Client not initialized. Call initialize() first.")
+        self._require("tools", "tools/call")
         result, err = self._transport.request(
             "tools/call",
             {"name": name, "arguments": arguments or {}},

@@ -21,6 +21,7 @@ Or copy `tiny_mcp_client.py` — it's one file, no dependencies.
 | **Full MCP API** | Tools, resources, prompts, sampling |
 | **Auth ready** | Bearer token via `api_key` parameter |
 | **Timeout control** | Per-request timeout, `MCPTimeoutError` on breach |
+| **Capability-aware** | `MCPCapabilityError` when a server never advertised `tools` — no silent `Method not found` |
 | **Context manager** | `async with` lifecycle management |
 
 ## Quick Start
@@ -104,6 +105,8 @@ client = MCPClient(
 **Methods:**
 - `await client.initialize()` → `ServerInfo` — Send handshake
 - `await client.close()` — End session
+- `client.supports("tools")` → `bool` — Did the server advertise this capability?
+- `client.capabilities` → `Dict[str, Any]` — Raw `capabilities` from `initialize`
 - `await client.list_tools()` → `List[ToolDefinition]`
 - `await client.call_tool(name, arguments)` → `Any`
 - `await client.list_resources()` → `List[ResourceDefinition]`
@@ -111,6 +114,38 @@ client = MCPClient(
 - `await client.list_prompts()` → `List[PromptDefinition]`
 - `await client.get_prompt(name, arguments)` → `Any`
 - `await client.create_sampling_message(...)` → `Any`
+
+### Capability negotiation
+
+An MCP server states what it implements in the `capabilities` object of its
+`initialize` result. A capability that is **absent** means *not implemented* —
+so the client refuses the call locally instead of sending a request that can
+only come back as an opaque JSON-RPC `Method not found`:
+
+```python
+from tiny_mcp_client import MCPClient, MCPCapabilityError
+
+async with MCPClient("http://localhost:8765") as client:
+    if client.supports("tools"):
+        tools = await client.list_tools()
+    else:
+        tools = []          # server never offered tools
+
+    try:
+        await client.list_tools()
+    except MCPCapabilityError as err:
+        print(err.capability, err.method, err.code)   # 'tools' 'tools/list' -32601
+```
+
+`MCPCapabilityError` subclasses `MCPError`, so existing
+`except MCPError` handlers keep working. `code` is `-32601` (JSON-RPC
+"method not found") and `data` carries the capabilities the server *did*
+advertise.
+
+This matters for the newest class of MCP servers — phone/device bridges,
+adversarial shields, single-resource servers — which advertise exactly one
+capability. Without the guard, calling `list_tools()` on a resources-only
+server looked like a transport fault.
 
 ### `MCPSyncClient`
 
