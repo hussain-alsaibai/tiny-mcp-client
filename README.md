@@ -7,7 +7,8 @@
 ## Install
 
 ```bash
-pip install tiny-mcp-client
+# From GitHub (recommended -- not yet on PyPI)
+pip install git+https://github.com/hussain-alsaibai/tiny-mcp-client.git
 ```
 
 Or copy `tiny_mcp_client.py` — it's one file, no dependencies.
